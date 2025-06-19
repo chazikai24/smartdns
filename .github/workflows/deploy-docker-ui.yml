@@ -85,7 +85,7 @@ jobs:
       - name: build-nextjs
         run: |
           cd ${{ github.workspace }}
-          git clone https://github.com/PikuZheng/smartdns-webui.git
+          git clone https://github.com/chazikai24/smartdns-webui.git
           docker run -i --rm -v ${{ github.workspace }}:/workdir node:lts-alpine sh -c "cd /workdir/smartdns-webui && npm install && NODE_ENV=production npm run build --no-analytics"
       - name: build-ui
         run: |
@@ -130,21 +130,21 @@ jobs:
           HEALTHCHECK --interval=5m CMD test $(nslookup dns.pub 127.0.0.1 |grep answer |wc -l) -gt 0
           CMD ["/usr/sbin/smartdns", "-f", "-x", "-p -"]
           EOF
-          docker login --username=${{ secrets.DOCKER_USERNAME }} --password='${{ secrets.DOCKER_PASSWORD }}'
-          if  test "$GOARCH" = "armv7" ;then
-            docker buildx build --no-cache --platform linux/arm/v7 --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
-          else
-            docker buildx build --no-cache --platform linux/$GOARCH --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
-          fi
-      - name: send to tencent cloud
-        continue-on-error: true
-        run: |
-          docker login ccr.ccs.tencentyun.com --username=${{ secrets.CCR_USERNAME }} --password='${{ secrets.CCR_PASSWORD }}'
-          if  test "$GOARCH" = "armv7" ;then
-            docker buildx build --no-cache --platform linux/arm/v7 --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
-          else
-            docker buildx build --no-cache --platform linux/$GOARCH --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
-          fi
+          #docker login --username=${{ secrets.DOCKER_USERNAME }} --password='${{ secrets.DOCKER_PASSWORD }}'
+          #if  test "$GOARCH" = "armv7" ;then
+            #docker buildx build --no-cache --platform linux/arm/v7 --push -t chazikai24/smartdns:ui-$GOARCH -f Dockerfile.unknown .
+          #else
+            #docker buildx build --no-cache --platform linux/$GOARCH --push -t chazikai24/smartdns:ui-$GOARCH -f Dockerfile.unknown .
+          #fi
+      #- name: send to tencent cloud
+        #continue-on-error: true
+        #run: |
+          #docker login ccr.ccs.tencentyun.com --username=${{ secrets.CCR_USERNAME }} --password='${{ secrets.CCR_PASSWORD }}'
+          #if  test "$GOARCH" = "armv7" ;then
+            #docker buildx build --no-cache --platform linux/arm/v7 --push -t chazikai24/smartdns:ui-$GOARCH -f Dockerfile.unknown .
+          #else
+            #docker buildx build --no-cache --platform linux/$GOARCH --push -t chazikai24/smartdns:ui-$GOARCH -f Dockerfile.unknown .
+          #fi
       - name: release ipk
         run: |
           cd ${{ github.workspace }}/package/openwrt
@@ -182,6 +182,6 @@ jobs:
       - name: create manifest
         run: |
           docker login --username=${{ secrets.DOCKER_USERNAME }} --password='${{ secrets.DOCKER_PASSWORD }}' && \
-          docker buildx imagetools create -t pikuzheng/smartdns:ui -t pikuzheng/smartdns:ui-${{needs.get-version.outputs.CUR_VERSION}} -t pikuzheng/smartdns:latest -t pikuzheng/smartdns:${{needs.get-version.outputs.CUR_VERSION}} pikuzheng/smartdns:ui-x86_64 pikuzheng/smartdns:ui-aarch64 pikuzheng/smartdns:ui-armv7
+          docker buildx imagetools create -t chazikai24/smartdns:ui -t chazikai24/smartdns:ui-${{needs.get-version.outputs.CUR_VERSION}} -t chazikai24/smartdns:latest -t chazikai24/smartdns:${{needs.get-version.outputs.CUR_VERSION}} chazikai24/smartdns:ui-x86_64 chazikai24/smartdns:ui-aarch64 chazikai24/smartdns:ui-armv7
           docker login ccr.ccs.tencentyun.com --username=${{ secrets.CCR_USERNAME }} --password='${{ secrets.CCR_PASSWORD }}' && \
-          docker buildx imagetools create -t pikuzheng/smartdns:ui -t pikuzheng/smartdns:ui-${{needs.get-version.outputs.CUR_VERSION}} -t pikuzheng/smartdns:latest -t pikuzheng/smartdns:${{needs.get-version.outputs.CUR_VERSION}} pikuzheng/smartdns:ui-x86_64 pikuzheng/smartdns:ui-aarch64 pikuzheng/smartdns:ui-armv7 || true
+          docker buildx imagetools create -t chazikai24/smartdns:ui -t chazikai24/smartdns:ui-${{needs.get-version.outputs.CUR_VERSION}} -t chazikai24/smartdns:latest -t chazikai24/smartdns:${{needs.get-version.outputs.CUR_VERSION}} chazikai24/smartdns:ui-x86_64 chazikai24/smartdns:ui-aarch64 chazikai24/smartdns:ui-armv7 || true
