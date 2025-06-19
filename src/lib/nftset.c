@@ -35,17 +35,48 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
+
+
 #ifdef NFNL_SUBSYS_NFTABLES
 #include <linux/netfilter/nf_tables.h>
 
-struct nlmsgreq {
-	struct nlmsghdr h;
-	struct nfgenmsg m;
+// Define cache structure and constants
+#define NFT_CACHE_MAX_SIZE 10
+#define NFT_SET_NAME_MAX 64
+
+
+struct nft_cache_entry {
+    char familyname[NFT_SET_NAME_MAX];
+    char tablename[NFT_SET_NAME_MAX];
+    char setname[NFT_SET_NAME_MAX];
+    unsigned char addr[16];
+    int addr_len;
+    unsigned long timeout;
 };
 
-enum { PAYLOAD_MAX = 2048 };
+static struct nft_cache_entry nft_cache[NFT_CACHE_MAX_SIZE];
+static int nft_cache_count = 0;
+static pthread_mutex_t nft_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+
+struct nlmsgreq {
+    struct nlmsghdr h;
+    struct nfgenmsg m;
+};
+
+enum { PAYLOAD_MAX = 8192 }; // Increased payload size for batching
 
 static int nftset_fd;
+
+// ... (All static helper functions from the original code remain unchanged)
+// _nftset_get_nffamily_from_str, _nftset_nlmsg_tail, _nftset_addattr,
+// _nftset_addattr_string, _nftset_addattr_uint32, _nftset_addattr_uint16,
+// _nftset_addattr_uint8, _nftset_addattr_nest, _nftset_addattr_nest_end,
+// _nftset_start_batch, _nftset_end_batch, _nftset_socket_init,
+// _nftset_socket_request, _nftset_socket_send, _nftset_get_nftset,
+// _nftset_get_flags, _nftset_del_element, _nftset_add_element,
+// _nftset_process_setflags, _nftset_del
 
 static int _nftset_get_nffamily_from_str(const char *family)
 {
@@ -514,95 +545,157 @@ static int _nftset_del(int nffamily, const char *tablename, const char *setname,
 	return _nftset_socket_send(buf, buffer_len);
 }
 
+int nftset_flush_cache(void) {
+    pthread_mutex_lock(&nft_cache_mutex);
+
+    if (nft_cache_count == 0) {
+        pthread_mutex_unlock(&nft_cache_mutex);
+        return 0;
+    }
+
+    uint8_t buf[PAYLOAD_MAX];
+    void *next = buf;
+    int buffer_len = 0;
+    int ret = 0;
+
+    _nftset_start_batch(next, &next);
+
+    for (int i = 0; i < nft_cache_count; ++i) {
+        struct nft_cache_entry *entry = &nft_cache[i];
+        int nffamily = _nftset_get_nffamily_from_str(entry->familyname);
+        uint32_t flags = 0;
+        uint8_t addr_end_buff[16] = {0};
+        uint8_t *addr_end = addr_end_buff;
+        int addr_end_len = 0;
+        unsigned long timeout = entry->timeout;
+
+        ret = _nftset_get_flags(nffamily, entry->tablename, entry->setname, &flags);
+        if (ret == 0) {
+            ret = _nftset_process_setflags(flags, entry->addr, entry->addr_len, &timeout, &addr_end, &addr_end_len);
+            if (ret != 0) {
+                tlog(TLOG_ERROR, "nftset flush failed for a cached item, invalid ip, family:%s, table:%s, set:%s",
+                     entry->familyname, entry->tablename, entry->setname);
+                continue; // Skip this entry
+            }
+        } else {
+            addr_end = NULL;
+            addr_end_len = 0;
+        }
+
+        if (timeout > 0) {
+            _nftset_del(nffamily, entry->tablename, entry->setname, entry->addr, entry->addr_len, addr_end, addr_end_len);
+        }
+
+        _nftset_add_element(nffamily, entry->tablename, entry->setname, entry->addr, entry->addr_len,
+                              addr_end, addr_end_len, timeout, next, &next);
+    }
+
+    _nftset_end_batch(next, &next);
+    buffer_len = (uint8_t *)next - buf;
+
+    if (buffer_len > NLMSG_LENGTH(sizeof(struct nfgenmsg)) * 2) {
+        ret = _nftset_socket_send(buf, buffer_len);
+        if (ret != 0) {
+            tlog(TLOG_ERROR, "nftset cache flush failed: %s", strerror(errno));
+        }
+    }
+
+
+    nft_cache_count = 0; // Clear the cache
+    pthread_mutex_unlock(&nft_cache_mutex);
+
+    return ret;
+}
+
+
 int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
-			   int addr_len)
+               int addr_len)
 {
-	int nffamily = _nftset_get_nffamily_from_str(familyname);
+    // It's safer to flush cache before a delete to avoid re-adding an item that should be deleted.
+    nftset_flush_cache();
+    int nffamily = _nftset_get_nffamily_from_str(familyname);
 
-	uint8_t addr_end_buff[16] = {0};
-	uint8_t *addr_end = addr_end_buff;
-	uint32_t flags = 0;
-	int addr_end_len = 0;
-	int ret = -1;
+    uint8_t addr_end_buff[16] = {0};
+    uint8_t *addr_end = addr_end_buff;
+    uint32_t flags = 0;
+    int addr_end_len = 0;
+    int ret = -1;
 
-	ret = _nftset_get_flags(nffamily, tablename, setname, &flags);
-	if (ret == 0) {
-		ret = _nftset_process_setflags(flags, addr, addr_len, 0, &addr_end, &addr_end_len);
-		if (ret != 0) {
-			return -1;
-		}
-	} else {
-		addr_end = NULL;
-		addr_end_len = 0;
-	}
+    ret = _nftset_get_flags(nffamily, tablename, setname, &flags);
+    if (ret == 0) {
+        ret = _nftset_process_setflags(flags, addr, addr_len, 0, &addr_end, &addr_end_len);
+        if (ret != 0) {
+            return -1;
+        }
+    } else {
+        addr_end = NULL;
+        addr_end_len = 0;
+    }
 
-	ret = _nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
-	if (ret != 0 && errno != ENOENT) {
-		tlog(TLOG_ERROR, "nftset delete failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename, setname,
-			 strerror(errno));
-	}
+    ret = _nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
+    if (ret != 0 && errno != ENOENT) {
+        tlog(TLOG_ERROR, "nftset delete failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename, setname,
+             strerror(errno));
+    }
 
-	return ret;
+    return ret;
 }
 
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
-			   int addr_len, unsigned long timeout)
+               int addr_len, unsigned long timeout)
 {
-	uint8_t buf[PAYLOAD_MAX];
-	uint8_t addr_end_buff[16] = {0};
-	uint8_t *addr_end = addr_end_buff;
-	uint32_t flags = 0;
-	int addr_end_len = 0;
-	void *next = buf;
-	int buffer_len = 0;
-	int ret = -1;
-	int nffamily = _nftset_get_nffamily_from_str(familyname);
+    pthread_mutex_lock(&nft_cache_mutex);
 
-	ret = _nftset_get_flags(nffamily, tablename, setname, &flags);
-	if (ret == 0) {
-		ret = _nftset_process_setflags(flags, addr, addr_len, &timeout, &addr_end, &addr_end_len);
-		if (ret != 0) {
-			if (dns_conf.nftset_debug_enable) {
-				tlog(TLOG_ERROR, "nftset add failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename,
-					 setname, "ip is invalid");
-			}
-			return -1;
-		}
-	} else {
-		addr_end = NULL;
-		addr_end_len = 0;
-	}
+    if (nft_cache_count >= NFT_CACHE_MAX_SIZE) {
+        pthread_mutex_unlock(&nft_cache_mutex);
+        nftset_flush_cache();
+        pthread_mutex_lock(&nft_cache_mutex);
+    }
 
-	if (timeout > 0) {
-		_nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
-	}
+    // Add to cache
+    struct nft_cache_entry *entry = &nft_cache[nft_cache_count];
+    strncpy(entry->familyname, familyname, NFT_SET_NAME_MAX -1);
+    strncpy(entry->tablename, tablename, NFT_SET_NAME_MAX - 1);
+    strncpy(entry->setname, setname, NFT_SET_NAME_MAX - 1);
+    entry->familyname[NFT_SET_NAME_MAX - 1] = '\0';
+    entry->tablename[NFT_SET_NAME_MAX - 1] = '\0';
+    entry->setname[NFT_SET_NAME_MAX - 1] = '\0';
 
-	_nftset_start_batch(next, &next);
-	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
-	_nftset_end_batch(next, &next);
-	buffer_len = (uint8_t *)next - buf;
 
-	ret = _nftset_socket_send(buf, buffer_len);
-	if (ret != 0) {
-		tlog(TLOG_ERROR, "nftset add failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename, setname,
-			 strerror(errno));
-	}
+    memcpy(entry->addr, addr, addr_len);
+    entry->addr_len = addr_len;
+    entry->timeout = timeout;
+    nft_cache_count++;
 
-	return ret;
+    int ret = 0;
+    if (nft_cache_count >= NFT_CACHE_MAX_SIZE) {
+        pthread_mutex_unlock(&nft_cache_mutex);
+        ret = nftset_flush_cache();
+    } else {
+        pthread_mutex_unlock(&nft_cache_mutex);
+    }
+
+    return ret;
 }
 
 #else
 
+// Fallback stubs for when NFNL_SUBSYS_NFTABLES is not defined
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
-			   int addr_len, unsigned long timeout)
+               int addr_len, unsigned long timeout)
 {
-	return 0;
+    return 0;
 }
 
 int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
-			   int addr_len)
+               int addr_len)
 {
-	return 0;
+    return 0;
+}
+
+int nftset_flush_cache(void)
+{
+    return 0;
 }
 
 #endif
