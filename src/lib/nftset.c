@@ -588,6 +588,7 @@ int nftset_flush_cache(void) {
 
         _nftset_add_element(nffamily, entry->tablename, entry->setname, entry->addr, entry->addr_len,
                               addr_end, addr_end_len, timeout, next, &next);
+	tlog(TLOG_INFO, "nftset flush cache:%d, family:%s, table:%s, set:%s, addr:%s", nft_cache_count, entry->familyname, entry->tablename, entry->setname, entry->addr);
     }
 
     _nftset_end_batch(next, &next);
@@ -633,6 +634,7 @@ int nftset_del(const char *familyname, const char *tablename, const char *setnam
     }
 
     ret = _nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
+    tlog(TLOG_INFO, "nftset del cache, family:%s, table:%s, set:%s, addr:%s", familyname, tablename, setname, addr);
     if (ret != 0 && errno != ENOENT) {
         tlog(TLOG_ERROR, "nftset delete failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename, setname,
              strerror(errno));
@@ -661,10 +663,10 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
     entry->tablename[NFT_SET_NAME_MAX - 1] = '\0';
     entry->setname[NFT_SET_NAME_MAX - 1] = '\0';
 
-
     memcpy(entry->addr, addr, addr_len);
     entry->addr_len = addr_len;
     entry->timeout = timeout;
+    tlog(TLOG_INFO, "nftset add cache, family:%s, table:%s, set:%s, addr:%s", familyname, tablename, setname, addr);
     nft_cache_count++;
 
     int ret = 0;
