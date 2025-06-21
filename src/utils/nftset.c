@@ -44,6 +44,8 @@
 // Define cache structure and constants
 #define NFT_CACHE_MAX_SIZE 10
 #define NFT_SET_NAME_MAX 64
+#define DNS_RR_A_LEN 4
+#define DNS_RR_AAAA_LEN 16
 
 
 struct nft_cache_entry {
@@ -588,7 +590,15 @@ int nftset_flush_cache(void) {
 
         _nftset_add_element(nffamily, entry->tablename, entry->setname, entry->addr, entry->addr_len,
                               addr_end, addr_end_len, timeout, next, &next);
-	tlog(TLOG_INFO, "nftset flush cache:%d, family:%s, table:%s, set:%s, addr:%s", nft_cache_count, entry->familyname, entry->tablename, entry->setname, entry->addr);
+	if (entry->addr_len == DNS_RR_A_LEN) {
+	    tlog(TLOG_INFO, "nftset flush cache:%d, family:%s, table:%s, set:%s, IP: %d.%d.%d.%d", i, entry->familyname, entry->tablename, entry->setname, 
+		entry->addr[0], entry->addr[1], entry->addr[2], entry->addr[3]);
+        } else if (entry->addr_len == DNS_RR_AAAA_LEN) {
+	    tlog(TLOG_INFO, "nftset flush cache:%d, family:%s, table:%s, set:%s, IP: "
+		"%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x", i, entry->familyname, entry->tablename, entry->setname, 
+	        entry->addr[0], entry->addr[1], entry->addr[2], entry->addr[3], entry->addr[4], entry->addr[5], entry->addr[6], entry->addr[7], 
+		entry->addr[8], entry->addr[9], entry->addr[10], entry->addr[11], entry->addr[12], entry->addr[13], entry->addr[14], entry->addr[15]);
+        }
     }
 
     _nftset_end_batch(next, &next);
@@ -634,7 +644,14 @@ int nftset_del(const char *familyname, const char *tablename, const char *setnam
     }
 
     ret = _nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
-    tlog(TLOG_INFO, "nftset del cache, family:%s, table:%s, set:%s, addr:%s", familyname, tablename, setname, addr);
+    if (addr_len == DNS_RR_A_LEN) {
+	tlog(TLOG_INFO, "nftset del cache, family:%s, table:%s, set:%s, IP: %d.%d.%d.%d", familyname, tablename, setname, addr[0], addr[1], addr[2],addr[3]);
+    } else if (addr_len == DNS_RR_AAAA_LEN) {
+	tlog(TLOG_INFO, "nftset del cache, family:%s, table:%s, set:%s, IP: "
+	    "%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x", familyname, tablename, setname, 
+	    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7], addr[8], addr[9], addr[10], addr[11],
+	    addr[12], addr[13], addr[14], addr[15]);
+    }
     if (ret != 0 && errno != ENOENT) {
         tlog(TLOG_ERROR, "nftset delete failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename, setname,
              strerror(errno));
@@ -666,7 +683,14 @@ int nftset_add(const char *familyname, const char *tablename, const char *setnam
     memcpy(entry->addr, addr, addr_len);
     entry->addr_len = addr_len;
     entry->timeout = timeout;
-    tlog(TLOG_INFO, "nftset add cache, family:%s, table:%s, set:%s, addr:%s", familyname, tablename, setname, addr);
+    if (addr_len == DNS_RR_A_LEN) {
+	tlog(TLOG_INFO, "nftset add cache, family:%s, table:%s, set:%s, IP: %d.%d.%d.%d", familyname, tablename, setname, addr[0], addr[1], addr[2],addr[3]);
+    } else if (addr_len == DNS_RR_AAAA_LEN) {
+	tlog(TLOG_INFO, "nftset add cache, family:%s, table:%s, set:%s, IP: "
+	    "%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x", familyname, tablename, setname, 
+	    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5], addr[6], addr[7], addr[8], addr[9], addr[10], addr[11],
+	    addr[12], addr[13], addr[14], addr[15]);
+    }
     nft_cache_count++;
 
     int ret = 0;
