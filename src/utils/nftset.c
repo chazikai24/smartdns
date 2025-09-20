@@ -45,9 +45,23 @@ struct nlmsgreq {
 	struct nfgenmsg m;
 };
 
+// 批量操作结构
+struct nftset_batch_item {
+	int nffamily;
+	char tablename[64];
+	char setname[64];
+	unsigned char addr[16];
+	int addr_len;
+	unsigned long timeout;
+	int is_add; // 1 for add, 0 for delete
+};
+
 enum { PAYLOAD_MAX = 2048 };
+enum { BATCH_MAX_ITEMS = 64 };
 
 static int nftset_fd;
+static struct nftset_batch_item batch_items[BATCH_MAX_ITEMS];
+static int batch_count = 0;
 
 static int _nftset_get_nffamily_from_str(const char *family)
 {
@@ -295,7 +309,7 @@ static int _nftset_socket_request(void *msg, int msg_len, void *ret_msg, int ret
 
 static int _nftset_socket_send(void *msg, int msg_len)
 {
-	char recvbuff[1024];
+	char recvbuff[2048];
 
 	if (dns_conf.nftset_debug_enable == 0) {
 		return _nftset_socket_request(msg, msg_len, NULL, 0);
@@ -502,18 +516,126 @@ static int _nftset_process_setflags(uint32_t flags, const unsigned char addr[], 
 	return 0;
 }
 
-static int _nftset_del(int nffamily, const char *tablename, const char *setname, const unsigned char addr[],
-					   int addr_len, const unsigned char addr_end[], int addr_end_len)
+// 批量处理函数
+static int _nftset_flush_batch(void)
 {
 	uint8_t buf[PAYLOAD_MAX];
 	void *next = buf;
 	int buffer_len = 0;
+	int ret = 0;
+
+	if (batch_count == 0) {
+		return 0;
+	}
 
 	_nftset_start_batch(next, &next);
-	_nftset_del_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, next, &next);
+
+	for (int i = 0; i < batch_count; i++) {
+		struct nftset_batch_item *item = &batch_items[i];
+		uint8_t addr_end_buff[16] = {0};
+		uint8_t *addr_end = addr_end_buff;
+		int addr_end_len = 0;
+		uint32_t flags = 0;
+
+		// 获取集合标志
+		ret = _nftset_get_flags(item->nffamily, item->tablename, item->setname, &flags);
+		if (ret == 0) {
+			if (item->is_add) {
+				ret = _nftset_process_setflags(flags, item->addr, item->addr_len, &item->timeout, &addr_end, &addr_end_len);
+			} else {
+				ret = _nftset_process_setflags(flags, item->addr, item->addr_len, NULL, &addr_end, &addr_end_len);
+			}
+
+			if (ret != 0) {
+				if (dns_conf.nftset_debug_enable) {
+					tlog(TLOG_ERROR, "nftset batch operation failed, family:%s, table:%s, set:%s, error:%s",
+					     item->nffamily == NFPROTO_INET ? "inet" :
+					     item->nffamily == NFPROTO_IPV4 ? "ip" :
+					     item->nffamily == NFPROTO_IPV6 ? "ip6" : "unknown",
+					     item->tablename, item->setname, "invalid address");
+				}
+				continue;
+			}
+		} else {
+			addr_end = NULL;
+			addr_end_len = 0;
+		}
+
+		// 如果是添加操作且有超时，先删除旧条目
+		if (item->is_add && item->timeout > 0) {
+			_nftset_del_element(item->nffamily, item->tablename, item->setname,
+			                   item->addr, item->addr_len, addr_end, addr_end_len, next, &next);
+		}
+
+		// 执行添加或删除操作
+		if (item->is_add) {
+			_nftset_add_element(item->nffamily, item->tablename, item->setname,
+			                   item->addr, item->addr_len, addr_end, addr_end_len,
+			                   item->timeout, next, &next);
+		} else {
+			_nftset_del_element(item->nffamily, item->tablename, item->setname,
+			                   item->addr, item->addr_len, addr_end, addr_end_len,
+			                   next, &next);
+		}
+
+		// 检查缓冲区是否接近满载
+		if ((uint8_t*)next - buf > PAYLOAD_MAX - 512) {
+			_nftset_end_batch(next, &next);
+			buffer_len = (uint8_t *)next - buf;
+			ret = _nftset_socket_send(buf, buffer_len);
+			if (ret != 0 && dns_conf.nftset_debug_enable) {
+				tlog(TLOG_ERROR, "nftset batch send failed, error:%s", strerror(errno));
+			}
+
+			// 重新开始批处理
+			next = buf;
+			_nftset_start_batch(next, &next);
+		}
+	}
+
+	// 发送剩余的操作
 	_nftset_end_batch(next, &next);
 	buffer_len = (uint8_t *)next - buf;
-	return _nftset_socket_send(buf, buffer_len);
+	ret = _nftset_socket_send(buf, buffer_len);
+	if (ret != 0 && dns_conf.nftset_debug_enable) {
+		tlog(TLOG_ERROR, "nftset batch send failed, error:%s", strerror(errno));
+	}
+
+	// 重置批处理计数
+	batch_count = 0;
+
+	return ret;
+}
+
+// 添加操作到批处理队列
+static int _nftset_batch_add_item(int nffamily, const char *tablename, const char *setname,
+                                  const unsigned char addr[], int addr_len, unsigned long timeout, int is_add)
+{
+	// 如果批处理队列已满，先刷新
+	if (batch_count >= BATCH_MAX_ITEMS) {
+		_nftset_flush_batch();
+	}
+
+	// 添加新项到批处理队列
+	struct nftset_batch_item *item = &batch_items[batch_count];
+	item->nffamily = nffamily;
+	strncpy(item->tablename, tablename, sizeof(item->tablename) - 1);
+	item->tablename[sizeof(item->tablename) - 1] = '\0';
+	strncpy(item->setname, setname, sizeof(item->setname) - 1);
+	item->setname[sizeof(item->setname) - 1] = '\0';
+	memcpy(item->addr, addr, addr_len);
+	item->addr_len = addr_len;
+	item->timeout = timeout;
+	item->is_add = is_add;
+
+	batch_count++;
+
+	// 如果批处理队列接近满载，自动刷新
+	if (batch_count >= BATCH_MAX_ITEMS - 1) {
+		_nftset_flush_batch();
+	}
+
+	return 0;
 }
 
 int nftset_del(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
@@ -521,76 +643,49 @@ int nftset_del(const char *familyname, const char *tablename, const char *setnam
 {
 	int nffamily = _nftset_get_nffamily_from_str(familyname);
 
-	uint8_t addr_end_buff[16] = {0};
-	uint8_t *addr_end = addr_end_buff;
-	uint32_t flags = 0;
-	int addr_end_len = 0;
-	int ret = -1;
+	// 直接使用批处理机制
+	_nftset_batch_add_item(nffamily, tablename, setname, addr, addr_len, 0, 0);
 
-	ret = _nftset_get_flags(nffamily, tablename, setname, &flags);
-	if (ret == 0) {
-		ret = _nftset_process_setflags(flags, addr, addr_len, NULL, &addr_end, &addr_end_len);
-		if (ret != 0) {
-			return -1;
-		}
-	} else {
-		addr_end = NULL;
-		addr_end_len = 0;
-	}
+	// 对于单个删除操作，立即执行
+	_nftset_flush_batch();
 
-	ret = _nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
-	if (ret != 0 && errno != ENOENT) {
-		tlog(TLOG_ERROR, "nftset delete failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename, setname,
-			 strerror(errno));
-	}
-
-	return ret;
+	return 0;
 }
 
 int nftset_add(const char *familyname, const char *tablename, const char *setname, const unsigned char addr[],
 			   int addr_len, unsigned long timeout)
 {
-	uint8_t buf[PAYLOAD_MAX];
-	uint8_t addr_end_buff[16] = {0};
-	uint8_t *addr_end = addr_end_buff;
-	uint32_t flags = 0;
-	int addr_end_len = 0;
-	void *next = buf;
-	int buffer_len = 0;
-	int ret = -1;
 	int nffamily = _nftset_get_nffamily_from_str(familyname);
 
-	ret = _nftset_get_flags(nffamily, tablename, setname, &flags);
-	if (ret == 0) {
-		ret = _nftset_process_setflags(flags, addr, addr_len, &timeout, &addr_end, &addr_end_len);
-		if (ret != 0) {
-			if (dns_conf.nftset_debug_enable) {
-				tlog(TLOG_ERROR, "nftset add failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename,
-					 setname, "ip is invalid");
-			}
-			return -1;
-		}
-	} else {
-		addr_end = NULL;
-		addr_end_len = 0;
-	}
+	// 使用批处理机制
+	_nftset_batch_add_item(nffamily, tablename, setname, addr, addr_len, timeout, 1);
 
-	if (timeout > 0) {
-		_nftset_del(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len);
-	}
+	// 对于单个添加操作，立即执行
+	_nftset_flush_batch();
 
-	_nftset_start_batch(next, &next);
-	_nftset_add_element(nffamily, tablename, setname, addr, addr_len, addr_end, addr_end_len, timeout, next, &next);
-	_nftset_end_batch(next, &next);
-	buffer_len = (uint8_t *)next - buf;
+	return 0;
+}
 
-	ret = _nftset_socket_send(buf, buffer_len);
-	if (ret != 0) {
-		tlog(TLOG_ERROR, "nftset add failed, family:%s, table:%s, set:%s, error:%s", familyname, tablename, setname,
-			 strerror(errno));
-	}
+// 显式刷新批处理队列
+int nftset_flush(void)
+{
+	return _nftset_flush_batch();
+}
 
-	return ret;
+// 批量添加接口
+int nftset_batch_add(const char *familyname, const char *tablename, const char *setname,
+                     const unsigned char addr[], int addr_len, unsigned long timeout)
+{
+	int nffamily = _nftset_get_nffamily_from_str(familyname);
+	return _nftset_batch_add_item(nffamily, tablename, setname, addr, addr_len, timeout, 1);
+}
+
+// 批量删除接口
+int nftset_batch_del(const char *familyname, const char *tablename, const char *setname,
+                     const unsigned char addr[], int addr_len)
+{
+	int nffamily = _nftset_get_nffamily_from_str(familyname);
+	return _nftset_batch_add_item(nffamily, tablename, setname, addr, addr_len, 0, 0);
 }
 
 #else
@@ -607,4 +702,22 @@ int nftset_del(const char *familyname, const char *tablename, const char *setnam
 	return 0;
 }
 
+int nftset_flush(void)
+{
+	return 0;
+}
+
+int nftset_batch_add(const char *familyname, const char *tablename, const char *setname,
+                     const unsigned char addr[], int addr_len, unsigned long timeout)
+{
+	return 0;
+}
+
+int nftset_batch_del(const char *familyname, const char *tablename, const char *setname,
+                     const unsigned char addr[], int addr_len)
+{
+	return 0;
+}
+
 #endif
+
