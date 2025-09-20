@@ -130,12 +130,12 @@ jobs:
           HEALTHCHECK --interval=5m CMD test $(nslookup dns.pub 127.0.0.1 |grep answer |wc -l) -gt 0
           CMD ["/usr/sbin/smartdns", "-f", "-x", "-p -"]
           EOF
-          docker login --username=${{ secrets.DOCKER_USERNAME }} --password='${{ secrets.DOCKER_PASSWORD }}'
-          if  test "$GOARCH" = "armv7" ;then
-            docker buildx build --no-cache --platform linux/arm/v7 --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
-          else
-            docker buildx build --no-cache --platform linux/$GOARCH --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
-          fi
+          #docker login --username=${{ secrets.DOCKER_USERNAME }} --password='${{ secrets.DOCKER_PASSWORD }}'
+          #if  test "$GOARCH" = "armv7" ;then
+            #docker buildx build --no-cache --platform linux/arm/v7 --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
+          #else
+            #docker buildx build --no-cache --platform linux/$GOARCH --push -t pikuzheng/smartdns:ui-$GOARCH -f Dockerfile.unknown .
+          #fi
       - name: send to tencent cloud
         continue-on-error: true
         run: |
