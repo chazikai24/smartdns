@@ -40,4 +40,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: smartdns-debian-x86_64
-        path: src/out/*.deb
+        path: package/*.deb
