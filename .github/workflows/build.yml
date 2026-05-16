@@ -34,10 +34,10 @@ jobs:
 
     - name: Run Build Script
       run: |
-        sh package/build-pkg.sh --platform debian --arch x86-64 --with-ui
+        sh package/build-pkg.sh --platform linux --arch x86-64 --with-ui
 
     - name: Upload Debian Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: smartdns-debian-x86_64
-        path: package/*.deb
+        name: smartdns-linux-x86_64
+        path: package/*.tar.gz
