@@ -1,0 +1,43 @@
+name: Build SmartDNS Debian Package
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: 
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04 
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential clang libclang-dev llvm libssl-dev
+
+    - name: Setup Node.js (for WebUI npm)
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20' 
+
+    - name: Setup Rust Toolchain
+      uses: actions/rust-toolchain@stable
+      with:
+        toolchain: stable 
+
+    - name: Run Build Script
+      run: |
+        sh package/build-pkg.sh --platform debian --arch x86-64 --with-ui
+
+    - name: Upload Debian Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: smartdns-debian-x86_64
+        path: src/out/*.deb
