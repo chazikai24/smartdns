@@ -1,0 +1,194 @@
+name: Build SmartDNS with Native UI for OpenWrt
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout SmartDNS Core
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 【关键加固】：拉取完整 Git 历史与所有 Tag，确保后续 git describe 能成功
+
+      - name: Checkout SmartDNS WebUI
+        uses: actions/checkout@v4
+        with:
+          repository: pymumu/smartdns-webui
+          path: smartdns-webui
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential libssl-dev curl gawk gettext git libncurses5-dev libz-dev patch unzip zlib1g-dev rsync
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download & Extract OpenWrt SDK
+        run: |
+          wget https://downloads.openwrt.org/releases/23.05.3/targets/x86/64/openwrt-sdk-23.05.3-x86-64_gcc-12.3.0_musl.Linux-x86_64.tar.xz
+          mkdir -p sdk
+          tar -xf openwrt-sdk-*.tar.xz -C sdk --strip-components=1
+
+      - name: 准备 SDK 运行环境并强制编译底层 OpenSSL
+        run: |
+          cd sdk
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+          export OPENSSL_DIR=$(find build_dir/target-x86_64_musl/ -maxdepth 1 -name "openssl-*" 2>/dev/null | head -n 1)
+          if [ -z "$OPENSSL_DIR" ]; then
+            make package/feeds/base/openssl/prepare V=s || make package/libs/openssl/prepare V=s
+            export OPENSSL_DIR=$(find build_dir/target-x86_64_musl/ -maxdepth 1 -name "openssl-*")
+          fi
+          echo "Found OpenSSL build dir: $OPENSSL_DIR"
+          make package/feeds/base/openssl/compile V=s -j$(nproc) || make package/libs/openssl/compile V=s -j$(nproc)
+
+      - name: 步骤 1 - 宿主机本地编译前端资产 (Node.js)
+        run: |
+          cd smartdns-webui
+          npm install
+          npm run build
+          echo "=== 检查前端产物输出 ==="
+          ls -la out/
+
+      - name: 步骤 2 - 纯交叉环境编译核心（静态）与 UI 插件（动态）
+        run: |
+          export TOOLCHAIN_DIR=$(find $GITHUB_WORKSPACE/sdk/staging_dir -maxdepth 1 -name "toolchain-*")
+          export TARGET_DIR=$(find $GITHUB_WORKSPACE/sdk/staging_dir -maxdepth 1 -name "target-*")
+          export SDK_CC_PATH="$TOOLCHAIN_DIR/bin/x86_64-openwrt-linux-musl-gcc"
+          export SDK_STRIP_PATH="$TOOLCHAIN_DIR/bin/x86_64-openwrt-linux-musl-strip"
+          export STAGING_DIR="$TARGET_DIR"
+          export CFLAGS="-I$TARGET_DIR/usr/include -L$TARGET_DIR/usr/lib"
+          
+          export LDFLAGS="-L$TARGET_DIR/usr/lib -lssl -lcrypto -static -lgcc_eh"
+          
+          export CARGO_BUILD_TARGET="x86_64-unknown-linux-musl"
+          export RUSTFLAGS="-C linker=$SDK_CC_PATH -C link-arg=-s"
+          
+          export CARGO_NET_RETRY=5
+          export CARGO_HTTP_CHECK_REVOKE=false
+          
+          make CC="$SDK_CC_PATH" STRIP="$SDK_STRIP_PATH" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" WITH_UI=1 CARGO_BUILD_TARGET="x86_64-unknown-linux-musl" CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$SDK_CC_PATH" -j$(nproc)
+          
+          echo "=== 检查交叉编译出的最终成品 ==="
+          ls -la src/smartdns || echo "❌ 核心主程序生成失败！"
+
+      - name: 步骤 3 & 4 - 严格遵循官方打包规范抽取 wwwroot 并封装 IPK
+        run: |
+          IPK_ROOT="$GITHUB_WORKSPACE/smartdns_ipk_root"
+          
+          # 创建基础系统骨架
+          mkdir -p $IPK_ROOT/usr/sbin
+          mkdir -p $IPK_ROOT/usr/lib/smartdns
+          mkdir -p $IPK_ROOT/usr/share/smartdns/wwwroot
+          mkdir -p $IPK_ROOT/etc/init.d
+          mkdir -p $IPK_ROOT/etc/smartdns
+          mkdir -p $IPK_ROOT/CONTROL
+          
+          # 1. 复制静态编译的二进制主程序
+          cp -f src/smartdns $IPK_ROOT/usr/sbin/smartdns
+          
+          # 2. 复制 Rust 插件动态库
+          find . -name "smartdns_ui.so" -o -name "libsmartdns_ui.so" -o -name "smartdns.so" | while read -r library; do
+            cp -f "$library" $IPK_ROOT/usr/lib/smartdns/smartdns_ui.so
+            break
+          done
+          
+          # 3. 复制前端专属静态 Web 资产
+          cp -rf $GITHUB_WORKSPACE/smartdns-webui/out/* $IPK_ROOT/usr/share/smartdns/wwwroot/
+          
+          # 4. 【基础层】首先同步源码顶层 etc/smartdns 结构（包含基础通用版配置）
+          if [ -d "etc/smartdns" ]; then
+            echo "正在注入基础通用配置文件..."
+            cp -rf etc/smartdns/* $IPK_ROOT/etc/smartdns/ 2>/dev/null || true
+          fi
+          
+          # 5. 【规则层】将 package/openwrt/ 根目录下的各类核心规则列表和配置文件塞进 etc/smartdns/
+          if [ -d "package/openwrt" ]; then
+            echo "正在提取 package/openwrt 目录下的规则列表文件..."
+            cp -f package/openwrt/*.conf $IPK_ROOT/etc/smartdns/ 2>/dev/null || true
+            cp -f package/openwrt/*.list $IPK_ROOT/etc/smartdns/ 2>/dev/null || true
+          fi
+          
+          # 6. 【特化层-压轴覆盖】最后同步 package/openwrt/files，确保 OpenWrt 专属平台配置拥有最高优先级
+          if [ -d "package/openwrt/files" ]; then
+            echo "正在用 OpenWrt 特化 files 覆盖并补全最终系统配置..."
+            cp -rf package/openwrt/files/* $IPK_ROOT/ 2>/dev/null || true
+          fi
+          
+          # 7. 策略性创建 4 个核心策略目录，确保配置文件中引用时不报错
+          mkdir -p $IPK_ROOT/etc/smartdns/conf.d
+          mkdir -p $IPK_ROOT/etc/smartdns/ip-set
+          mkdir -p $IPK_ROOT/etc/smartdns/domain-set
+          mkdir -p $IPK_ROOT/etc/smartdns/download
+          
+          # 打印检查最终的打包树结构
+          echo "=== 检查即将进入 IPK 的 /etc/smartdns 完整结构 ==="
+          ls -la $IPK_ROOT/etc/smartdns/
+          
+          # ==================== 【复刻 PikuZheng 动态版本号逻辑】 ====================
+          # 提取当前分支最近的 Tag（剔除 v 或 V 前缀），若提取失败（如未打 tag 的 master）则赋予基准主版本号 1
+          VERSION=$(git describe --tags --abbrev=0 2>/dev/null | tr -d 'vV ')
+          if [ -z "$VERSION" ]; then
+            VERSION="1"
+          fi
+          
+          # 抓取当日日期与高频分钟级时间戳
+          CURRENT_DATE=$(date +%Y.%m.%d)
+          CURRENT_TIME=$(date +%H%M)
+          
+          # 拼接完整的流水号三合一版本 (例如: 46.2026.05.29-1805)
+          FULL_VERSION="${VERSION}.${CURRENT_DATE}-${CURRENT_TIME}"
+          echo "🔥 遵循 test-new 构建流生成的动态版本号为: ${FULL_VERSION}"
+          # =========================================================================
+          
+          # 8. 生成原生的控制元数据
+          echo "Package: smartdns" > $IPK_ROOT/CONTROL/control
+          echo "Version: ${FULL_VERSION}" >> $IPK_ROOT/CONTROL/control
+          echo "Title: SmartDNS with Native Web UI" >> $IPK_ROOT/CONTROL/control
+          echo "Architecture: x86_64" >> $IPK_ROOT/CONTROL/control
+          echo "Section: net" >> $IPK_ROOT/CONTROL/control
+          echo "Category: Network" >> $IPK_ROOT/CONTROL/control
+          echo "Maintainer: OpenWrt Developer" >> $IPK_ROOT/CONTROL/control
+          echo "Depends: libc" >> $IPK_ROOT/CONTROL/control
+          echo "Description: SmartDNS with Native Web UI statically linked with test-new style versions." >> $IPK_ROOT/CONTROL/control
+          
+          mkdir -p $GITHUB_WORKSPACE/output
+          cd sdk
+          ./scripts/ipkg-build $IPK_ROOT $GITHUB_WORKSPACE/output
+
+      - name: 步骤 5 - 解压并进行终极可靠性验证
+        run: |
+          echo "=== 成功生成的 IPK ==="
+          ls -la output/
+          cd output
+          if [ -f *.ipk ]; then
+            echo "=== 正在解压验证 IPK 内部文件结构 ==="
+            ar x *.ipk 2>/dev/null || tar -xf *.ipk 2>/dev/null
+            if [ -f data.tar.gz ]; then
+              tar -tf data.tar.gz 2>/dev/null | grep -E "sbin/smartdns|lib/smartdns/smartdns_ui.so|share/smartdns/wwwroot/|etc/smartdns/smartdns.conf|etc/smartdns/domain-block.list" || echo "❌ 验证失败：关键结构或配置文件丢失"
+            elif [ -f data.tar.zst ]; then
+              tar -tf data.tar.zst 2>/dev/null | grep -E "sbin/smartdns|lib/smartdns/smartdns_ui.so|share/smartdns/wwwroot/|etc/smartdns/smartdns.conf|etc/smartdns/domain-block.list" || echo "❌ 验证失败：关键结构或配置文件丢失"
+            fi
+          else
+            echo "❌ 未检测到生成的 ipk 文件！"
+            exit 1
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: smartdns-native-ui-static-x86_64
+          path: output/*.ipk

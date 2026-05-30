@@ -1,0 +1,71 @@
+name: Build Debian x86-64 Static Package with UI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: "Debian x86-64 (Static)"
+            platform: "debian"
+            arch: "x86-64"
+            is_openwrt: false
+            artifact_name: "smartdns-debian-static-x86_64"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang libclang-dev llvm libssl-dev zlib1g-dev debhelper dpkg-dev
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Pre-build WebUI Frontend Assets
+        run: |
+          set -e
+          if [ -d "package/target/smartdns-webui" ]; then
+            cd package/target/smartdns-webui
+            npm install
+            npm run build
+            cd -
+          fi
+          if [ -d "plugin/smartdns-ui/webapp" ]; then
+            cd plugin/smartdns-ui/webapp
+            npm install
+            npm run build
+            cd -
+          fi
+
+      - name: Run Build Script (Debian)
+        if: matrix.is_openwrt == false
+        run: |
+          chmod +x package/build-pkg.sh
+          rm -f package/*.tar.gz package/*.deb package/*.ipk
+          sh package/build-pkg.sh --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --with-ui --static
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            package/*.tar.gz
+            package/*.deb
+            package/*.ipk
+          if-no-files-found: error
