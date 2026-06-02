@@ -63,7 +63,7 @@ jobs:
           echo "=== 检查前端产物输出 ==="
           ls -la out/
 
-      - name: 步骤 2 - 纯交叉环境编译核心（静态）与 UI 插件（动态）
+      - name: 步骤 2 - 纯交叉环境编译核心（动态）与 UI 插件（动态）
         run: |
           export TOOLCHAIN_DIR=$(find $GITHUB_WORKSPACE/sdk/staging_dir -maxdepth 1 -name "toolchain-*")
           export TARGET_DIR=$(find $GITHUB_WORKSPACE/sdk/staging_dir -maxdepth 1 -name "target-*")
@@ -71,12 +71,9 @@ jobs:
           export SDK_STRIP_PATH="$TOOLCHAIN_DIR/bin/x86_64-openwrt-linux-musl-strip"
           export STAGING_DIR="$TARGET_DIR"
           export CFLAGS="-I$TARGET_DIR/usr/include -L$TARGET_DIR/usr/lib"
-          
-          export LDFLAGS="-L$TARGET_DIR/usr/lib -lssl -lcrypto -static -lgcc_eh"
-          
+          export LDFLAGS="-L$TARGET_DIR/usr/lib -lssl -lcrypto"
           export CARGO_BUILD_TARGET="x86_64-unknown-linux-musl"
           export RUSTFLAGS="-C linker=$SDK_CC_PATH -C link-arg=-s"
-          
           export CARGO_NET_RETRY=5
           export CARGO_HTTP_CHECK_REVOKE=false
           
@@ -97,7 +94,7 @@ jobs:
           mkdir -p $IPK_ROOT/etc/smartdns
           mkdir -p $IPK_ROOT/CONTROL
           
-          # 1. 复制静态编译的二进制主程序
+          # 1. 复制动态编译的二进制主程序
           cp -f src/smartdns $IPK_ROOT/usr/sbin/smartdns
           
           # 2. 复制 Rust 插件动态库
@@ -162,8 +159,12 @@ jobs:
           echo "Section: net" >> $IPK_ROOT/CONTROL/control
           echo "Category: Network" >> $IPK_ROOT/CONTROL/control
           echo "Maintainer: OpenWrt Developer" >> $IPK_ROOT/CONTROL/control
-          echo "Depends: libc" >> $IPK_ROOT/CONTROL/control
-          echo "Description: SmartDNS with Native Web UI statically linked with test-new style versions." >> $IPK_ROOT/CONTROL/control
+          
+          # 补充 libopenssl 依赖（非静态编译后必须依赖系统 ssl 库）
+          echo "Depends: libc, libopenssl" >> $IPK_ROOT/CONTROL/control
+          
+          # 更新 Description 文案描述
+          echo "Description: SmartDNS with Native Web UI dynamically linked with test-new style versions." >> $IPK_ROOT/CONTROL/control
           
           mkdir -p $GITHUB_WORKSPACE/output
           cd sdk
@@ -190,5 +191,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: smartdns-native-ui-static-x86_64
+          name: smartdns-native-ui-dynamic-x86_64
           path: output/*.ipk
