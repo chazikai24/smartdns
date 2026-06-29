@@ -127,6 +127,15 @@ static int HpackCountHeader(void *ctx, const char *name, const char *value)
 	return 0;
 }
 
+static int HpackExpectUafHeader(void *ctx, const char *name, const char *value)
+{
+	int *count = (int *)ctx;
+	EXPECT_STREQ(name, "x-hpack-uaf");
+	EXPECT_STREQ(value, "two");
+	(*count)++;
+	return 0;
+}
+
 TEST_F(LIBHTTP2, HpackDynamicTableSizeUpdateMustPrecedeHeaders)
 {
 	struct hpack_context hpack;
@@ -168,6 +177,31 @@ TEST_F(LIBHTTP2, HpackResizeEvictsDynamicEntriesBeforeReuse)
 	ASSERT_GT(hpack_encode_header(&hpack, "x-hpack-sync", "dynamic-value", buf, sizeof(buf)), 0);
 	EXPECT_NE(buf[0], 0xbe);
 	EXPECT_EQ(hpack.entry_count, 0);
+
+	hpack_free_context(&hpack);
+}
+
+TEST_F(LIBHTTP2, HpackDecodeIndexedDynamicNameSurvivesEviction)
+{
+	struct hpack_context hpack;
+	uint8_t buf[128] = {0};
+	int count = 0;
+	hpack_init_context(&hpack);
+
+	ASSERT_GT(hpack_encode_header(&hpack, "x-hpack-uaf", "one", buf, sizeof(buf)), 0);
+	ASSERT_EQ(hpack.entry_count, 1);
+	hpack.max_dynamic_table_size = hpack.dynamic_table_size;
+
+	const uint8_t reuse_dynamic_name[] = {
+		0x7e,              /* literal indexed, name index 62: first dynamic entry */
+		0x03, 't', 'w', 'o'
+	};
+	EXPECT_EQ(hpack_decode_headers(&hpack, reuse_dynamic_name, sizeof(reuse_dynamic_name), HpackExpectUafHeader, &count),
+			  0);
+	EXPECT_EQ(count, 1);
+	EXPECT_EQ(hpack.entry_count, 1);
+	EXPECT_STREQ(hpack.dynamic_table->name, "x-hpack-uaf");
+	EXPECT_STREQ(hpack.dynamic_table->value, "two");
 
 	hpack_free_context(&hpack);
 }
