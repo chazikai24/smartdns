@@ -81,8 +81,9 @@ fn link_smartdns_lib() {
 
     let ignored_macros = IgnoreMacros(vec!["IPPORT_RESERVED".into()].into_iter().collect());
 
-    let mut bindings_builder =
-        bindgen::Builder::default().header(format!("{}/smartdns/smartdns.h", smartdns_inc_dir));
+    let mut bindings_builder = bindgen::Builder::default()
+        .header(format!("{}/smartdns/smartdns.h", smartdns_inc_dir))
+        .blocklist_type("max_align_t");
     if let Some(sysroot) = sysroot {
         bindings_builder = bindings_builder.clang_arg(format!("--sysroot={}", sysroot));
     }
@@ -96,6 +97,22 @@ fn link_smartdns_lib() {
     bindings
         .write_to_file(out_path.join("smartdns_bindings.rs"))
         .expect("Couldn't write bindings!");
+
+    /*
+    A libclang that bindgen does not support turns structs into empty placeholders
+    (bindgen 0.69 with libclang 22), which otherwise only shows up as layout errors.
+    */
+    let text = bindings.to_string();
+    let hlist_node = text
+        .find("pub struct hlist_node {")
+        .map(|start| &text[start..start + text[start..].find('}').unwrap_or(0)]);
+    if !hlist_node.map_or(false, |def| def.contains("pprev")) {
+        panic!(
+            "bindgen generated an incomplete hlist_node ({:?}), libclang {} could not parse the smartdns headers",
+            hlist_node,
+            bindgen::clang_version().full
+        );
+    }
     /*
     to run tests, please run the following command:
     make test-prepare
